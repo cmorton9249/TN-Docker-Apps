@@ -1,18 +1,22 @@
+version: "3.8"
+
 services:
   pihole:
     image: pihole/pihole:latest
+    secrets:
+      - pihole_webpasswd
     restart: unless-stopped
     hostname: pi-hole
     environment:
-      TZ: "America/New_York"
-      ServerIP: "192.168.1.253"
       DNSMASQ_LISTENING: "all"
-      # read password from the Compose secret:
+      ServerIP: "192.168.1.253"
+      TZ: "America/New_York"
       WEBPASSWORD_FILE: pihole_webpasswd
     volumes:
-      - /mnt/tank/apps/pi-hole:/etc/pihole
-      - /mnt/tank/apps/pi-hole/dnsmasq.d:/etc/dnsmasq.d
-    cap_add: [ "NET_ADMIN" ]
+      - /mnt/Main/AppData/pihole/etc-pihole:/etc/pihole
+      - /mnt/Main/AppData/pihole/etc-dnsmasq.d:/etc/dnsmasq.d
+    cap_add:
+      - NET_ADMIN
     ports:
       - "192.168.1.253:53:53/udp"
       - "192.168.1.253:53:53/tcp"
@@ -21,9 +25,6 @@ services:
     dns:
       - 1.1.1.1
       - 1.0.0.1
-    secrets:
-      - pihole_webpasswd
-
 secrets:
   pihole_webpasswd:
-    file: /mnt/tank/apps/secrets/pihole_password.txt
+    file: /mnt/Main/AppData/secrets/pihole_password.txt

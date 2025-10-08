@@ -1,4 +1,5 @@
-sudo mkdir -p /mnt/tank/apps/secrets
-sudo sh -c 'printf "%s" "check-lastpass-for-pihole-secret" > /mnt/tank/apps/secrets/pihole_password.txt'
-sudo chown root:root /mnt/tank/apps/secrets/pihole_password.txt
-sudo chmod 600 /mnt/tank/apps/secrets/pihole_password.txt
+SECRETS_DIR='/mnt/Main/AppData/secrets'
+sudo mkdir -p "$SECRETS_DIR"
+sudo sh -c 'printf "%s" "check-lastpass-for-current-value" > '$SECRETS_DIR/pihole_password.txt'
+sudo chown root:root '$SECRETS_DIR'/pihole_password.txt
+sudo chmod 600 '$SECRETS_DIR'/pihole_password.txt
