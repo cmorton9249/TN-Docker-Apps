@@ -1,0 +1,18 @@
+services:
+  dmz-proxy:
+    image: nginx:stable
+    container_name: dmz-proxy
+    restart: unless-stopped
+    networks:
+      dmznet:
+        ipv4_address: 192.168.50.230
+    # macvlan: no published ports; nginx listens directly on 80/443 at its IP
+    volumes:
+      - /mnt/Main/AppData/nginx-proxy/conf/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /mnt/Main/AppData/nginx-proxy/conf/sites:/etc/nginx/conf.d:ro
+      - /mnt/Main/AppData/nginx-proxy/certs:/etc/ssl/certs:ro
+      - /mnt/Main/AppData/nginx-proxy/logs:/var/log/nginx
+
+networks:
+  dmznet:
+    external: true
