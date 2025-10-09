@@ -5,15 +5,16 @@ services:
     image: lscr.io/linuxserver/plex:latest
     container_name: plex
     restart: unless-stopped
+    networks:
+      dmznet:
+        ipv4_address: 192.168.50.226
     environment:
       - TZ=America/New_York
-      - PUID=3000  #Verify this UID aligns with the TrueNAS Plex User
-      - PGID=3000  #Verify this GID aligns with the TrueNAS PlexUsers Group
+      - PUID=3000
+      - PGID=3000
       - VERSION=docker
-      - PLEX_CLAIM=claim-STkHH-z16wHCJZys2xxs
-      # For remote access – pick ONE of these two lines:
-      # - ADVERTISE_IP=http://myplex.exampleddns.org:32400
-      # - ADVERTISE_IP=http://YOUR.PUBLIC.IP.ADDR:32400
+      - PLEX_CLAIM=claim-goL3sgfGNHDA87PEMA5h
+      - ADVERTISE_IP=http://192.168.50.226:32400/
     volumes:
       - /mnt/Main/AppData/plex:/config
       - /mnt/Main/Media:/data:ro
@@ -22,20 +23,6 @@ services:
       - /mnt/Main/AppData/plex/transcode:/transcode
       - /mnt/Main/AppData/plex/logs:/logs
 
-    network_mode: bridge
-    ports:
-      # Local convenience (keep these as you have them)
-      - "192.168.1.35:80:32400/tcp"
-      - "192.168.1.35:443:32400/tcp"
-
-      # Native Plex ports (required for remote + discovery)
-      - "192.168.1.35:32400:32400/tcp"
-      - "192.168.1.35:32469:32469/tcp"
-      - "192.168.1.35:1900:1900/udp"
-      - "192.168.1.35:32410:32410/udp"
-      - "192.168.1.35:32412:32412/udp"
-      - "192.168.1.35:32413:32413/udp"
-      - "192.168.1.35:32414:32414/udp"
-
-    # devices:
-    #   - /dev/dri:/dev/dri
+networks:
+  dmznet:
+    external: true
