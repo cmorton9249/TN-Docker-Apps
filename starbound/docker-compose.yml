@@ -1,0 +1,17 @@
+networks:
+  primenet:
+    external: True
+services:
+  starbound:
+    container_name: starbound
+    environment:
+      - TZ=America/New_York
+      - PUID=568
+      - PGID=568
+    image: morgyn/starbound:latest
+    networks:
+      primenet:
+        ipv4_address: 192.168.1.240
+    restart: unless-stopped
+    volumes:
+      - /mnt/Main/AppData/starbound:/starbound
