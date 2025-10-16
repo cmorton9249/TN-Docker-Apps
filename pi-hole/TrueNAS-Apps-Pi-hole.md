@@ -1,29 +1,34 @@
 # TrueNAS Apps — Pi-hole on 192.168.1.253 (Final)
 
-This document captures the **finished, reproducible** setup for running Pi-hole on TrueNAS SCALE with a dedicated IP **without** macvlan. It uses a **host IP alias** and **port bindings**, with the admin password supplied via a **Compose secret**.
+This document captures the **finished, reproducible** setup for running Pi-hole on TrueNAS SCALE with a dedicated IP using a custom Docker network (`primenet`) and static IP assignment, with the admin password supplied via a **Compose secret**.
 
 ---
 
 ## Overview
-- **Pi-hole IP:** `192.168.1.253` (host IP alias; TrueNAS GUI bound to a different IP)
+- **Pi-hole IP:** `192.168.1.253` (static IP via Docker network `primenet`)
+- **Docker network:** `primenet` (external, must exist before deploy)
 - **Data path:** `/mnt/Main/AppData/pihole`
   - `etc-pihole` → mounted to `/etc/pihole`
   - `etc-dnsmasq.d` → mounted to `/etc/dnsmasq.d`
 - **Secret path:** `/mnt/Main/AppData/secrets/pihole_password.txt` (no trailing newline)
-- **Why this design:** avoids macvlan/ipvlan quirks, lets the host and LAN use Pi-hole, works cleanly with TrueNAS Apps
+- **Why this design:** avoids macvlan/ipvlan quirks, provides clean network isolation, works cleanly with TrueNAS Apps
 
 ---
 
 ## Final Docker Compose (TrueNAS Apps)
 ```yaml
-version: "3.8"
-
+networks:
+  primenet:
+    external: true
 services:
   pihole:
     image: pihole/pihole:latest
     secrets:
       - pihole_webpasswd
     restart: unless-stopped
+    networks:
+      primenet:
+        ipv4_address: 192.168.1.253
     hostname: pi-hole
     environment:
       DNSMASQ_LISTENING: "all"
@@ -35,21 +40,16 @@ services:
       - /mnt/Main/AppData/pihole/etc-dnsmasq.d:/etc/dnsmasq.d
     cap_add:
       - NET_ADMIN
-    ports:
-      - "192.168.1.253:53:53/udp"
-      - "192.168.1.253:53:53/tcp"
-      - "192.168.1.253:80:80/tcp"
-      - "192.168.1.253:443:443/tcp"
     dns:
       - 1.1.1.1
       - 1.0.0.1
-
 secrets:
   pihole_webpasswd:
     file: /mnt/Main/AppData/secrets/pihole_password.txt
 ```
 
-> **Note:** Ensure the TrueNAS GUI is not bound to 0.0.0.0:80/443 if you use those ports on `.253`. Scope the GUI to the host’s primary IP in *System Settings → General → GUI*.
+
+> **Note:** The `primenet` network must exist and be configured with the correct subnet and gateway. Ensure no IP conflicts on your LAN. The TrueNAS GUI should not be bound to the same IP as Pi-hole.
 
 ---
 
