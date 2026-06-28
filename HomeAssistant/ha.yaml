@@ -1,0 +1,15 @@
+networks:
+  ha-vlan:
+    external: True
+services:
+  homeassistant:
+    container_name: homeassistant
+    environment:
+      - TZ=America/New_York
+    image: ghcr.io/home-assistant/home-assistant:stable
+    networks:
+      ha-vlan:
+        ipv4_address: 192.168.101.5
+    restart: unless-stopped
+    volumes:
+      - /mnt/Main/AppData/HomeAssistant:/config
