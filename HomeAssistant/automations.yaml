@@ -1,0 +1,132 @@
+- id: '1782739038610'
+  alias: Turn Attic Light Off
+  description: ''
+  triggers:
+  - type: turned_on
+    device_id: 8dde074982999cac2d1d75946be39379
+    entity_id: c282c5e62eb298c49c25334245aa6edd
+    domain: switch
+    trigger: device
+    for:
+      hours: 0
+      minutes: 15
+      seconds: 0
+  conditions: []
+  actions:
+  - type: turn_off
+    device_id: 8dde074982999cac2d1d75946be39379
+    entity_id: c282c5e62eb298c49c25334245aa6edd
+    domain: switch
+  mode: single
+- id: '1783989564724'
+  alias: Close Shuttle Bay Doors after 10pm
+  description: ''
+  triggers:
+  - trigger: time
+    at: '22:00:00'
+    weekday:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+    - sat
+    - sun
+    note: Any day after 10PM
+  conditions:
+  - or:
+    - condition: device
+      device_id: 5a77dbd5d4250275e11e8110b9ce0a06
+      domain: cover
+      entity_id: d116c107322cbe213d68d6582f3d76b9
+      type: is_open
+    - condition: device
+      device_id: 2fc5624093cfe8857a673cb22e4b8078
+      domain: cover
+      entity_id: 21865d1314929abff1c2033c5306d495
+      type: is_open
+    alias: If Main Shuttle Bay OR Shuttle Bay 2 is open
+  actions:
+  - action: notify.send_message
+    metadata: {}
+    target:
+      entity_id:
+      - notify.chriss_phone
+      - notify.caryns_iphone_17_pro
+    data:
+      title: Secure the Shuttle Bay
+      message: Starbase 6515 Shuttle Bay is not secured.  Dock all shuttles and close
+        the bay doors.
+  mode: single
+- id: '1783989850762'
+  alias: Laundry Room Light off after 30 mins
+  description: ''
+  triggers:
+  - type: turned_on
+    device_id: 6a66228953cbdcc715ebdad42d296f6f
+    entity_id: 964ea2eba1cd836eae1d2404adff74b8
+    domain: light
+    trigger: device
+    for:
+      hours: 0
+      minutes: 15
+      seconds: 0
+  conditions: []
+  actions:
+  - action: light.turn_off
+    metadata: {}
+    target:
+      device_id: 6a66228953cbdcc715ebdad42d296f6f
+    data: {}
+  mode: single
+- id: '1788431813821'
+  alias: AM Lights On
+  description: ''
+  triggers:
+  - trigger: time
+    at: 06:30:00
+    weekday:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+  conditions: []
+  actions:
+  - action: light.turn_on
+    metadata: {}
+    target:
+      device_id: ce5d1f1e42904c0f10651d14b2a37d6c
+    data:
+      brightness_pct: 100
+  - action: light.turn_on
+    metadata: {}
+    target:
+      device_id: 32d5c21a6ebe0a64989c1a4387cf7da2
+    data: {}
+  mode: single
+- id: '1788432046068'
+  alias: AM Lights Off
+  description: ''
+  triggers:
+  - trigger: time
+    at: 07:45:00
+    weekday:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+  conditions: []
+  actions:
+  - action: light.turn_off
+    metadata: {}
+    target:
+      device_id: ce5d1f1e42904c0f10651d14b2a37d6c
+    data: {}
+  - action: light.turn_off
+    metadata: {}
+    target:
+      device_id: 32d5c21a6ebe0a64989c1a4387cf7da2
+    data: {}
+  mode: single

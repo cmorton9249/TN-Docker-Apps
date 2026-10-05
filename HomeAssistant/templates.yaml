@@ -1,0 +1,9 @@
+- binary_sensor:
+    - name: "Washer Door"
+      unique_id: washer_door_status
+      state: "{{ is_state('binary_sensor.1st_floor_washer_door', 'on') }}"
+      availability: "{{ has_value('binary_sensor.1st_floor_washer_door') }}"
+    - name: "Dryer Door"
+      unique_id: dryer_door_status
+      state: "{{ is_state('binary_sensor.1st_floor_dryer_door', 'on') }}"
+      availability: "{{ has_value('binary_sensor.1st_floor_dryer_door') }}"

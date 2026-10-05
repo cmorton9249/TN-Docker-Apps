@@ -1,52 +1,57 @@
-# Home Assistant on TrueNAS Scale — Segmented Network Build
+# Home Assistant on TrueNAS Scale — Build & Operations Guide
 
 A reference for deploying Home Assistant as a custom Docker app on TrueNAS Scale, placed on an isolated IoT VLAN via macvlan, reached internally and externally through an existing nginx reverse proxy in the DMZ with wildcard TLS.
 
 ## Architecture summary
 
-- **Home Assistant** runs as a container pinned to a static IP on the **IoT VLAN**, giving it local L2 presence with IoT devices (including mDNS discovery).
-- The **TrueNAS host holds no IP on the IoT VLAN** — only the HA container does, via macvlan. Host isolation is preserved.
-- A **reverse proxy in the DMZ** terminates TLS and forwards to HA. HA is never exposed to the internet directly.
-- The **UDM brokers all cross-VLAN traffic** through scoped firewall rules.
+- **Home Assistant** runs as a TrueNAS Custom App (Docker) pinned to a static IP on the **IoT VLAN** via macvlan, giving it L2 presence with IoT devices.
+- The **TrueNAS host has no IP on the IoT VLAN**; only the container does.
+- The **DMZ nginx reverse proxy** terminates TLS (wildcard cert) and forwards to HA. HA is never exposed directly.
+- **Cloudflare** fronts external access (proxied, Full (Strict)). Internal clients bypass it via Pi-hole split-horizon DNS.
+- The **UDM** brokers all cross-VLAN traffic with narrowly scoped rules.
 
 Example addressing used throughout (substitute your own):
 
 | Element | Value |
 |---|---|
 | IoT subnet / gateway | `192.168.101.0/24` / `192.168.101.1` |
-| Home Assistant container IP | `192.168.101.5` |
-| DMZ reverse proxy IP | `192.168.50.230` |
-| Primary LAN subnet | `192.168.1.0/24` |
+| Home Assistant container | `192.168.101.5` (outside the IoT DHCP pool) |
+| DMZ reverse proxy | `192.168.50.230` |
+| Primary LAN / UDM | `192.168.1.0/24` / `192.168.1.1` |
+| Pi-hole | `192.168.1.253` |
 | Public hostname | `homeassistant.teammorton.net` |
+| HA config dataset | `/mnt/Main/AppData/HomeAssistant` → `/config` |
 
-> The IoT container IP must sit **outside** the IoT DHCP pool. macvlan does not defend its address against a DHCP lease, so pick an address the DHCP server will never hand out (e.g. below the pool start).
+## The files and how each is applied
 
----
+| File | Where it lives | Purpose | Applying a change |
+|---|---|---|---|
+| `ha.yaml` | Pasted into **TrueNAS Apps → Custom App** (not read from `/config`) | Container definition: image, IP, volume | Edit the app in the TrueNAS UI and save; the container redeploys |
+| `configuration.yaml` | `/mnt/Main/AppData/HomeAssistant/` | Root config; pulls in the other files; proxy trust | **Check Configuration**, then **full restart** |
+| `templates.yaml` | same folder | Template sensors (washer/dryer door) | First time: full restart. After that: **Reload Template Entities** |
+| `automations.yaml` | same folder | Automations (managed by the HA UI) | Edit in the UI; if edited by hand, **Reload Automations** |
+| `scripts.yaml`, `scenes.yaml` | same folder | Currently empty; must exist because `configuration.yaml` includes them | Nothing to do; HA creates them on first run |
 
-## 1. Prepare TrueNAS host networking
+Rationale: `configuration.yaml` is the only file HA reads directly. Everything else is reached through its `!include` lines, so a file that is not referenced there is silently ignored. Validate before applying, since a YAML error in the root config can stop HA from starting.
 
-The host needs the IoT VLAN delivered to it as a tagged subinterface, then bridged, with **no IP assigned** (so the host stays off the segment; only the container gets an address).
-
-1. **Trunk the VLAN to the NAS port.** On the UDM, ensure the switch port feeding the NAS NIC carries the IoT VLAN **tagged**. (Match the NIC already used for other tagged VLANs rather than consuming a separate port, unless physical separation is desired.)
-2. **TrueNAS → Network → Interfaces → Add → VLAN:**
-   - Name: `vlan101` (example)
-   - Parent Interface: the active NIC carrying the trunk
-   - VLAN Tag: the IoT VLAN's 802.1Q tag *(note: the VLAN tag is independent of the subnet's third octet — use the actual configured tag)*
-   - DHCP: off, IPv6: off, **no IP alias**
-3. **Add → Bridge:**
-   - Name: `br101` (example)
-   - Bridge Members: the VLAN interface created above (`vlan101`)
-   - Enable Learning: on
-   - **Aliases: empty — no IP**
-4. **Test Changes**, confirm connectivity is retained, then **Save Changes.** These persist as native TrueNAS config across reboots.
-
-> The VLAN **tag** must match on both ends — the UDM network's configured VLAN ID and the TrueNAS subinterface tag. The subnet is independent of the tag.
+Edit files from the TrueNAS shell or the SMB share (`\\192.168.1.10\AppData\HomeAssistant`). Use spaces, never tabs.
 
 ---
 
-## 2. Create the macvlan Docker network
+## Part A — Network and infrastructure
 
-Created once from the console, referenced as an external network by the app. The subnet/gateway must exactly match the real IoT L2; the subnet declaration does not reserve or claim addresses — only explicitly assigned container IPs are used.
+### A1. TrueNAS host networking
+
+The host receives the IoT VLAN as a tagged subinterface, bridged, with **no IP** so the host stays off the segment.
+
+1. **UDM:** the switch port feeding the NAS NIC carries the IoT VLAN **tagged** (Native VLAN: None). Add the IoT network to that port's tagged VLANs.
+2. **TrueNAS → Network → Interfaces → Add → VLAN:** name `vlan101`, parent = the NIC carrying the trunk, VLAN tag = the IoT network's actual VLAN ID, DHCP off, no IP alias.
+3. **Add → Bridge:** name `br101`, member `vlan101`, Enable Learning on, Aliases empty.
+4. **Test Changes**, confirm connectivity, then **Save Changes**.
+
+Rationale: the VLAN tag must match on both the UDM and the NAS; it is independent of the subnet's third octet. An IP-less bridge mirrors how the DMZ bridge is already built and keeps the host out of the IoT segment.
+
+### A2. macvlan Docker network
 
 ```bash
 sudo docker network create -d macvlan \
@@ -66,78 +71,66 @@ sudo docker network inspect ha-vlan
 
 Confirm `parent` = `br101`, subnet `192.168.101.0/24`, gateway `192.168.101.1`.
 
----
+Rationale: the subnet must match the real IoT L2 exactly, but declaring it does not reserve addresses; only IPs assigned to containers are used. The TrueNAS app engine accepts only lowercase letters, digits and hyphens in names (`^[a-z]([-a-z0-9]*[a-z0-9])?$`), so `ha-vlan` works and `HA_VLAN` does not.
 
-## 3. Deploy Home Assistant (TrueNAS Custom App)
+### A3. UDM firewall (zone-based)
 
-**Apps → Discover Apps → (top-right) → Install via YAML.**
+Inter-zone traffic is deny-by-default. Add scoped allows by destination host and port, above the zone's catch-all.
 
-- **Name:** `homeassistant-tn` (lowercase/hyphen only)
-- **Custom Config:**
+| # | Purpose | Src zone | Source | Dst zone | Destination | Port | Action |
+|---|---|---|---|---|---|---|---|
+| 1 | LAN admin to HA | Internal | LAN (or an admin host) | IoT | `192.168.101.5` | TCP 8123 | Allow |
+| 2 | Reverse proxy to HA | DMZ | `192.168.50.230` | IoT | `192.168.101.5` | TCP 8123 | Allow |
+| 3 | HA outbound internet | IoT | `192.168.101.5` | External | any | TCP 443 | Allow (already satisfied if IoT → External is Allow) |
 
-```yaml
-services:
-  homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:stable
-    container_name: homeassistant
-    restart: unless-stopped
-    environment:
-      - TZ=America/New_York
-    volumes:
-      - /mnt/Main/AppData/HomeAssistant:/config
-    networks:
-      ha-vlan:
-        ipv4_address: 192.168.101.5
+Rationale: rule 2 pins the source to the proxy so a DMZ compromise cannot roam IoT. Return traffic is stateful, so no reverse rules are needed. Leave IoT → Internal and IoT → DMZ at default deny.
 
-networks:
-  ha-vlan:
-    external: true
+**Optional: UniFi Protect integration (HA to the UDM).** Protect answers on the UDM's own IP (`192.168.1.1:443`), which the UDM evaluates in the **Gateway** zone. IoT → Gateway is Allow All by default, so every IoT device can reach the router's management plane. Close it with source-scoped rules, in this order, all IoT → Gateway with destination `192.168.1.1`:
+
+| Order | Name | Source | Port | Action |
+|---|---|---|---|---|
+| 1 | IoT DNS to gateway | IoT (any) | 53 TCP+UDP | Allow |
+| 2 | IoT DHCP to gateway | IoT (any) | 67 UDP | Allow |
+| 3 | HA to UniFi Protect | `192.168.101.5` | 443 TCP | Allow |
+| 4 | Allow mDNS | (built-in) | 5353 UDP | Allow |
+| 5 | Block IoT to gateway mgmt | IoT (any) | 443, 22 TCP | **Block** |
+| 6 | Allow All Traffic | (built-in, locked) | any | Allow |
+
+Rationale: the built-in Allow All at the bottom cannot be edited, but a Block placed above it overrides it (first match wins). HA's allow must sit above the block because both target the same socket (`192.168.1.1:443`); only the source differs. Use a dedicated **local Viewer-role Protect user** for the integration, not an admin account: the firewall limits reachability, the account limits capability.
+
+Verify from a throwaway container that stands in for a generic IoT device (HA itself holds `.5`):
+
+```bash
+sudo docker run --rm -it --network ha-vlan --ip 192.168.101.6 alpine sh -c "
+  apk add -q curl;
+  curl -k -sS -m 4 -o /dev/null -w '%{http_code}\n' https://192.168.1.1/ || echo BLOCKED;
+  nslookup google.com 192.168.1.1 >/dev/null 2>&1 && echo DNS-OK || echo DNS-FAIL"
 ```
 
-- Set the `volumes` host path to your own dataset.
-- Use `TZ` for timezone rather than mounting `/etc/localtime` (the bind-mount can misbehave on Scale).
+Expected: `BLOCKED` on 443, `DNS-OK`. A working Protect camera in HA confirms the allow rule for `.5`.
 
-Save. First boot takes a minute or two while HA initializes `/config` and its database.
+### A4. DNS (split-horizon, Pi-hole v6)
 
-> **macvlan host isolation:** the TrueNAS host **cannot** reach the container's macvlan IP directly. Test HA from a LAN client through the UDM, not with `curl` from the NAS shell. This is expected behavior.
+1. **Local DNS record:** `homeassistant.teammorton.net` → `192.168.50.230`.
+2. **Suppress IPv6 leakage.** Pi-hole admin → Settings → switch to **Expert** → All settings → `misc.dnsmasq_lines`, add one line:
+   ```
+   local=/teammorton.net/
+   ```
+   Save.
 
----
+Rationale: a local A record alone lets AAAA queries fall through to public DNS, which returns Cloudflare's IPv6 edge. IPv6-preferring clients then hairpin out through Cloudflare and fail. `local=/teammorton.net/` makes Pi-hole authoritative for the domain, so AAAA returns empty and clients use the IPv4 record. Side effect: every `teammorton.net` name used internally needs its own Pi-hole record. When IPv6 is deployed later, add AAAA local records under the same domain.
 
-## 4. UDM firewall configuration (required regardless of prior state)
+Verify from a client (`ipconfig /flushdns` first):
 
-On a zone-based firewall, inter-zone traffic is deny-by-default once zones exist. Add explicit, **tightly scoped** allows — scope by destination host IP and port, never open whole zones. Note that zones may contain multiple networks; scoping by destination IP keeps rules precise.
+```cmd
+nslookup homeassistant.teammorton.net
+```
 
-| # | Purpose | Src zone | Src | Dst zone | Dst | Dst port | Action |
-|---|---|---|---|---|---|---|---|
-| 1 | LAN admin access to HA | Internal/LAN | LAN (or admin host) | IoT | `192.168.101.5` | `8123` (TCP) | Allow |
-| 2 | Reverse proxy to HA | DMZ | `192.168.50.230` | IoT | `192.168.101.5` | `8123` (TCP) | Allow |
-| 3 | HA outbound internet | IoT | `192.168.101.5` | External/WAN | any | `443` (TCP) | Allow |
+Expect only `192.168.50.230`, with no `2606:4700:...` addresses.
 
-Rule notes:
+### A5. Wildcard TLS certificate (acme.sh, DNS-01)
 
-- **Rule 1** lets you reach HA directly from the LAN without hairpinning through the proxy.
-- **Rule 2** is the external access path — pin the source to the proxy's IP only, so a DMZ compromise can't roam the IoT segment.
-- **Rule 3** is required for HA updates and any cloud integrations (e.g. Nest via the SDM API). If the IoT zone already allows outbound internet broadly, this is satisfied; otherwise scope it to the HA host.
-- **Stateful return traffic is automatic** — do not add reverse `IoT → LAN`/`IoT → DMZ` allows.
-- **Leave `IoT → LAN` and `IoT → DMZ` at default deny.** HA reaching its own IoT-subnet devices is intra-zone and needs no rule.
-- Ensure each Allow sits **above** the corresponding zone's catch-all Block rule.
-
----
-
-## 5. DNS (split-horizon)
-
-Add an internal DNS record so LAN/IoT clients reach the proxy directly instead of routing out to the WAN and back:
-
-- **Internal (Pi-hole / UDM):** `homeassistant.teammorton.net` → `192.168.50.230` (the reverse proxy)
-- **External (public DNS):** the hostname → your WAN IP, only if external access is required.
-
----
-
-## 6. Wildcard TLS certificate (acme.sh, DNS-01)
-
-A wildcard covers every current and future service under the domain, so per-host certs are never needed again. Wildcards require DNS-01 validation. Run with the same containerized invocation used by the renewal cron so paths and credentials align.
-
-**Issue** (Cloudflare DNS shown — adjust `--dns` for your provider):
+Issue (Cloudflare DNS plugin; credentials live in `acme.env`):
 
 ```bash
 docker run --rm \
