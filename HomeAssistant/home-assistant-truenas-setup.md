@@ -1,6 +1,6 @@
-# Home Assistant on TrueNAS Scale — Build & Operations Guide (v2)
+# Home Assistant on TrueNAS Scale — Build & Operations Guide
 
-Supersedes `home-assistant-truenas-setup.md`. Same architecture, now including the working configuration files (`ha.yaml`, `configuration.yaml`, `templates.yaml`, `automations.yaml`), the DNS and Cloudflare pieces added after the first build, and the UniFi Protect firewall hardening.
+A reference for deploying Home Assistant as a custom Docker app on TrueNAS Scale, placed on an isolated IoT VLAN via macvlan, reached internally and externally through an existing nginx reverse proxy in the DMZ with wildcard TLS.
 
 ## Architecture summary
 
@@ -9,6 +9,8 @@ Supersedes `home-assistant-truenas-setup.md`. Same architecture, now including t
 - The **DMZ nginx reverse proxy** terminates TLS (wildcard cert) and forwards to HA. HA is never exposed directly.
 - **Cloudflare** fronts external access (proxied, Full (Strict)). Internal clients bypass it via Pi-hole split-horizon DNS.
 - The **UDM** brokers all cross-VLAN traffic with narrowly scoped rules.
+
+Example addressing used throughout (substitute your own):
 
 | Element | Value |
 |---|---|
@@ -58,6 +60,10 @@ sudo docker network create -d macvlan \
   -o parent=br101 \
   ha-vlan
 ```
+
+> **Naming:** the TrueNAS custom-app engine validates names against `^[a-z]([-a-z0-9]*[a-z0-9])?$` — lowercase letters, digits, and hyphens only. No uppercase, no underscores. This applies to the network name and the app name. (`ha-vlan` is valid; `HA_VLAN` is not.)
+
+Verify:
 
 ```bash
 sudo docker network inspect ha-vlan
@@ -137,7 +143,7 @@ docker run --rm \
   -d "teammorton.net" -d "*.teammorton.net"
 ```
 
-Install to the filenames nginx mounts (`-d` is the main domain, the first `-d` above):
+**Install to the filenames nginx mounts** (the `-d` here is the cert's main domain — the first `-d` from issue):
 
 ```bash
 docker run --rm \
@@ -152,41 +158,34 @@ docker run --rm \
   --reloadcmd "echo cert installed"
 ```
 
-Verify:
+Verify the SAN covers the wildcard and apex:
 
 ```bash
 openssl x509 -in /mnt/Main/AppData/nginx-proxy/certs/fullchain.pem -noout -subject -ext subjectAltName -dates
 ```
 
-Expect `DNS:*.teammorton.net, DNS:teammorton.net` and an expiry about 90 days out.
+Expect `DNS:*.teammorton.net, DNS:teammorton.net` and a `notAfter` ~90 days out. The existing `--cron` renewal job renews the wildcard automatically (keyed by main domain) using the same DNS-01 method — no cron change needed.
 
-Renewal runs from a cron job on the TrueNAS host and reloads the proxy afterwards:
+---
+
+## 7. nginx reverse proxy vhost
+
+The proxy container mounts its config from host paths. Confirm the mappings:
 
 ```bash
-docker run --rm \
-  --env-file /mnt/Main/AppData/nginx-proxy/acme/acme.env \
-  -v /mnt/Main/AppData/nginx-proxy/acme:/acme.sh \
-  -v /mnt/Main/AppData/nginx-proxy/certs:/certs \
-  neilpang/acme.sh \
-  --cron --home /acme.sh \
-&& docker exec dmz-proxy nginx -s reload
+sudo docker inspect dmz-proxy --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
 ```
 
-Rationale: wildcards require DNS-01, which needs no inbound port 80. One wildcard covers every current and future service, so no per-host cert work. `--cron` renews by main domain using the same DNS method, so the cron entry never changes.
+Typical layout:
 
-### A6. nginx reverse proxy vhost
+- `…/conf/sites` → `/etc/nginx/conf.d` (vhost files; the main `nginx.conf` includes `/etc/nginx/conf.d/*.conf`)
+- `…/certs` → `/etc/ssl/certs` (certificate files)
+- `…/conf/nginx.conf` → `/etc/nginx/nginx.conf` (main config, holds the `http` block)
 
-The `dmz-proxy` container bind-mounts its config from the host:
-
-| Host path | Container path | Contents |
-|---|---|---|
-| `/mnt/Main/AppData/nginx-proxy/conf/nginx.conf` | `/etc/nginx/nginx.conf` | Main config (`http` block, WebSocket `map`) |
-| `/mnt/Main/AppData/nginx-proxy/conf/sites` | `/etc/nginx/conf.d` | Vhost files (included by `nginx.conf`) |
-| `/mnt/Main/AppData/nginx-proxy/certs` | `/etc/ssl/certs` | Certificate files |
-
-Save as `/mnt/Main/AppData/nginx-proxy/conf/sites/homeassistant.conf`. Use the **container-side** cert paths:
+Place the vhost file in the **host directory that maps to `/etc/nginx/conf.d`** (e.g. `…/conf/sites/homeassistant.conf`). Use the **container-side** cert paths in the config.
 
 ```nginx
+# homeassistant.conf
 server {
   listen 80;
   server_name homeassistant.teammorton.net;
@@ -216,171 +215,61 @@ server {
 }
 ```
 
-`$connection_upgrade` comes from a `map $http_upgrade $connection_upgrade { ... }` block in the `http` section of `nginx.conf`. HA's frontend needs WebSockets, so that map must exist.
+> The `$connection_upgrade` variable comes from a `map $http_upgrade $connection_upgrade { … }` block that must exist in the `http` block of the main `nginx.conf`. This is required for Home Assistant's WebSocket frontend.
+
+Validate and reload (macvlan proxy listens directly on its IP — reload via exec):
 
 ```bash
 sudo docker exec dmz-proxy nginx -t && sudo docker exec dmz-proxy nginx -s reload
 ```
 
-Rationale: the host folder name (`sites`) is irrelevant; nginx only reads what is mounted at the path its `include` points to. `nginx -t` gates the reload, so a bad config never replaces the running one. The mounts are read-only, so edit from the host.
-
-### A7. Cloudflare and WAN access (external path)
-
-1. **DNS:** an `A` record for `homeassistant` pointing at the WAN IP, **proxied** (orange cloud).
-2. **SSL/TLS → Overview:** mode **Full (Strict)**.
-3. **UDM port forward:** WAN TCP 443 → `192.168.50.230:443`.
-4. **Security rules (in place):** custom rule *US Only Traffic* (block where country is not US) and the AI-crawler block.
-
-Rationale: Flexible mode makes Cloudflare connect to the origin over port 80, where nginx's HTTP→HTTPS redirect creates an infinite loop ("too many redirects"). Full (Strict) connects over 443 and validates the Let's Encrypt cert. These rules protect only the external path; internal clients resolve straight to the proxy and bypass Cloudflare.
+`nginx -t` must pass before the reload runs; a valid reload is zero-downtime for existing connections.
 
 ---
 
-## Part B — Deploy the container (`ha.yaml`)
+## 8. Home Assistant — trust the reverse proxy
 
-`ha.yaml` is the TrueNAS-normalized form of the Custom App definition (keys alphabetized, `True` capitalized by the exporter; functionally identical to what was submitted).
-
-```yaml
-networks:
-  ha-vlan:
-    external: True
-services:
-  homeassistant:
-    container_name: homeassistant
-    environment:
-      - TZ=America/New_York
-    image: ghcr.io/home-assistant/home-assistant:stable
-    networks:
-      ha-vlan:
-        ipv4_address: 192.168.101.5
-    restart: unless-stopped
-    volumes:
-      - /mnt/Main/AppData/HomeAssistant:/config
-```
-
-**First deployment**
-
-1. Confirm the `ha-vlan` network exists (A2) and `/mnt/Main/AppData/HomeAssistant` exists.
-2. TrueNAS → **Apps → Discover Apps → Install via YAML**.
-3. Name: `homeassistant-tn`. Paste the YAML above as the Custom Config. Save.
-4. Allow 1–2 minutes for first boot (HA initializes `/config` and its database).
-
-**Changing it later:** Apps → `homeassistant-tn` → Edit, change the YAML, save. Configuration changes inside HA do not go through this file.
-
-Rationale: `external: true` tells the app engine to attach to the pre-built macvlan rather than create its own. Use `TZ` for the timezone; mounting `/etc/localtime` can misbehave on Scale. The static `ipv4_address` is the container's address; the UDM DHCP pool must not include it.
-
-Note: macvlan isolates the host from its own containers. Test HA from a LAN client, not with `curl` from the NAS shell.
-
----
-
-## Part C — Home Assistant configuration files
-
-All three live in `/mnt/Main/AppData/HomeAssistant/`.
-
-### C1. `configuration.yaml`
+HA rejects proxied requests unless the proxy's IP is explicitly trusted. Edit `configuration.yaml` in the mounted config directory (`/mnt/Main/AppData/HomeAssistant/configuration.yaml`):
 
 ```yaml
-# Loads default set of integrations. Do not remove.
-default_config:
-
-# Load frontend themes from the themes folder
-frontend:
-  themes: !include_dir_merge_named themes
-
-automation: !include automations.yaml
-script: !include scripts.yaml
-scene: !include scenes.yaml
-template: !include templates.yaml
-
 http:
   use_x_forwarded_for: true
   trusted_proxies:
     - 192.168.50.230
 ```
 
-What each block does:
+- Both keys are required together.
+- The value is the **proxy's** IP, not the client's.
+- If an `http:` block already exists, merge these keys into it rather than adding a second block.
 
-- `default_config`: loads HA's standard integration set.
-- `!include` lines: split-file pattern. Each domain lives in its own file, keeping this file short.
-- `template: !include templates.yaml`: loads the template sensors in C2. Without this line `templates.yaml` is never read, and Check Configuration still passes.
-- `http:`: **required for the reverse proxy.** HA rejects requests carrying forwarded headers unless the sender is a trusted proxy, returning `400 Bad Request`. Both keys are needed together; the value is the **proxy's** IP, not the client's. If an `http:` block already exists, merge into it, because duplicate top-level keys prevent HA from starting.
+Changes to the `http:` integration require a **full restart**:
 
-**Apply:** Developer Tools → YAML → **Check Configuration**; when clean, restart (`sudo docker restart homeassistant` or the UI restart). `http:` and a newly added `template:` key always need a full restart.
-
-### C2. `templates.yaml`
-
-```yaml
-- binary_sensor:
-    - name: "Washer Door"
-      unique_id: washer_door_status
-      state: "{{ is_state('binary_sensor.1st_floor_washer_door', 'on') }}"
-      availability: "{{ has_value('binary_sensor.1st_floor_washer_door') }}"
-    - name: "Dryer Door"
-      unique_id: dryer_door_status
-      state: "{{ is_state('binary_sensor.1st_floor_dryer_door', 'on') }}"
-      availability: "{{ has_value('binary_sensor.1st_floor_dryer_door') }}"
+```bash
+sudo docker restart homeassistant
 ```
-
-Why it exists: the Whirlpool integration forces `device_class: door` on its door sensors, and that reasserts itself on every reload, so the UI override does not stick. Door-type classes (`door`, `window`, `opening`, `garage_door`) are all grouped as security by the auto-generated dashboards. These template sensors mirror the originals but carry **no device class**, so they appear as plain On/Off appliance sensors.
-
-- `state`: mirrors the source (`on` = door open, `off` = closed).
-- `availability`: goes unavailable if the Whirlpool entity drops, instead of falsely reporting "closed" to automations.
-- `unique_id`: lets you assign an Area and rename the entity in the UI.
-- The file starts at the list level because the `template:` key lives in `configuration.yaml`. Do not repeat `template:` here.
-
-**Finish the setup (one time, in the UI):**
-
-1. Set **Area = Laundry Room** on `binary_sensor.washer_door` and `binary_sensor.dryer_door`.
-2. Open each Whirlpool original (`binary_sensor.1st_floor_washer_door`, `binary_sensor.1st_floor_dryer_door`) and set **Visible = off**. Do **not** disable them; the templates read them as their data source.
-3. Point automations at the new entities.
-
-**Apply:** Check Configuration, then restart the first time. For later edits use Developer Tools → YAML → **Reload Template Entities**.
-
-**Limitation:** YAML-defined template entities cannot be attached to a device (`device_id` is rejected), so on auto-generated dashboards they sit under "Others" instead of on the appliance card. Options: accept it, place them on a manual dashboard card, or recreate them as UI Helpers (Settings → Devices & Services → Helpers → Template), which support device assignment.
-
-**Adding more:** append another `- name:` entry under the same `binary_sensor:` list.
-
-### C3. `automations.yaml`
-
-| Automation | Trigger | Action |
-|---|---|---|
-| Turn Attic Light Off | Attic switch on for 15 min | Turn the switch off |
-| Close Shuttle Bay Doors after 10pm | Daily at 22:00 | If Main Shuttle Bay **or** Shuttle Bay 2 cover is open, send a "Secure the Shuttle Bay" notification to two phones |
-| Laundry Room Light off after 30 mins | Laundry Room light on for **15** min | Turn the light off |
-| AM Lights On | 06:30 Mon–Fri | Turn on two lights (the first at 100%) |
-| AM Lights Off | 07:45 Mon–Fri | Turn both lights off |
-
-Usage notes:
-
-- The file is **managed by the HA UI** (numeric `id` values). Creating or editing automations in the UI rewrites the file and discards hand-written comments. Make changes in the UI; if you edit the file by hand, run **Check Configuration** then **Reload Automations**.
-- Triggers, conditions and actions reference `device_id` / `entity_id` hex values. These come from the entity and device registry in `/config/.storage`, so the file is only portable together with that folder. On a fresh HA install the IDs will not resolve; rebuild the automations in the UI instead.
-- Notification targets (`notify.chriss_phone`, `notify.caryns_iphone_17_pro`) exist only after each phone has registered with the HA Companion app.
-- **Known mismatch:** *Laundry Room Light off after 30 mins* is named for 30 minutes but its trigger is `minutes: 15`. Either rename the automation or change the duration to match your intent.
 
 ---
 
-## Part D — Verify and maintain
+## 9. Verify
 
-**Verify**
+1. Browse to `https://homeassistant.teammorton.net` from a LAN client.
+2. TLS is valid (wildcard cert), and Home Assistant's onboarding/welcome screen loads.
+3. Complete onboarding to create the admin account.
 
-1. `nslookup homeassistant.teammorton.net` from a LAN client returns only `192.168.50.230`.
-2. `https://homeassistant.teammorton.net` loads from the LAN with a valid wildcard cert.
-3. The same URL, and the Companion app, work from a cellular connection.
-4. Developer Tools → YAML → Check Configuration reports no errors.
-5. Developer Tools → States: `binary_sensor.washer_door` and `binary_sensor.dryer_door` exist with no `device_class` attribute, and track the Whirlpool originals.
+---
 
-**Backup**
+## Reference: file and value checklist
 
-Back up the entire `/mnt/Main/AppData/HomeAssistant` dataset, including the hidden `.storage` folder, which holds the device/entity registry, UI-created integrations and credentials. A periodic ZFS snapshot of that dataset is the simplest option. Keep `ha.yaml`, `configuration.yaml`, `templates.yaml` and `automations.yaml` in version control or a separate copy as well.
-
-**Quick reference: what to do after each change**
-
-| Changed | Do this |
+| Item | Location / value |
 |---|---|
-| `ha.yaml` (container) | Edit the app in TrueNAS and save |
-| `configuration.yaml` | Check Configuration, then full restart |
-| `templates.yaml` | Check Configuration, then Reload Template Entities |
-| `automations.yaml` | Edit in the UI, or Check Configuration then Reload Automations |
-| nginx vhost | `docker exec dmz-proxy nginx -t && docker exec dmz-proxy nginx -s reload` |
-| Pi-hole `dnsmasq_lines` | Save in the Pi-hole UI |
-| Certificate | Automatic via cron |
-| New `teammorton.net` service | Add a Pi-hole local record, an nginx vhost and (if external) a Cloudflare record |
+| TrueNAS VLAN interface | `vlan101`, tag = configured IoT VLAN ID, parent = trunk NIC, no IP |
+| TrueNAS bridge | `br101`, member `vlan101`, no IP |
+| macvlan network | `ha-vlan`, parent `br101`, `192.168.101.0/24`, gw `.1` |
+| HA container IP | `192.168.101.5` (outside DHCP pool) |
+| HA config dataset | `/mnt/Main/AppData/HomeAssistant` → `/config` |
+| Proxy IP | `192.168.50.230` |
+| Cert files (host) | `…/nginx-proxy/certs/{fullchain,privkey}.pem` |
+| Cert files (container) | `/etc/ssl/certs/{fullchain,privkey}.pem` |
+| vhost file | `…/nginx-proxy/conf/sites/homeassistant.conf` |
+| HA `trusted_proxies` | `192.168.50.230` |
+| Public hostname | `homeassistant.teammorton.net` |
